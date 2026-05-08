@@ -475,7 +475,97 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => console.warn("[chatgpt-deep-ask] fillAndSubmit threw:", e));
     return false;
   }
+  if (msg?.type === "ATTACH_IMAGE" && IS_TOP_FRAME) {
+    console.log("[chatgpt-deep-ask] ATTACH_IMAGE received. dataUrl size:", msg.dataUrl?.length);
+    sendResponse({ ok: true, started: true });
+    attachImageAndSubmit(msg.dataUrl, msg.prompt)
+      .then((ok) => console.log("[chatgpt-deep-ask] attachImageAndSubmit returned", ok))
+      .catch((e) => console.warn("[chatgpt-deep-ask] attachImageAndSubmit threw:", e));
+    return false;
+  }
 });
+
+async function attachImageAndSubmit(dataUrl, prompt) {
+  if (!dataUrl) return false;
+  const editor = await waitFor(findEditor, 15000);
+  if (!editor) {
+    console.warn("[chatgpt-deep-ask] attachImageAndSubmit: editor not found");
+    return false;
+  }
+  console.log("[chatgpt-deep-ask] editor found:", editor.tagName);
+
+  let blob;
+  try {
+    blob = await fetch(dataUrl).then((r) => r.blob());
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] dataUrl→blob failed:", e);
+    return false;
+  }
+  const file = new File([blob], "capture.png", { type: "image/png" });
+
+  // Method 1: paste event with clipboardData on the editor
+  editor.focus();
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const pasteEvt = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvt, "clipboardData", { value: dt });
+    editor.dispatchEvent(pasteEvt);
+    console.log("[chatgpt-deep-ask] paste event dispatched");
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] paste failed:", e);
+  }
+
+  await sleep(800);
+
+  // Method 2 fallback: <input type="file"> change
+  const fileInputs = document.querySelectorAll('input[type="file"]');
+  console.log("[chatgpt-deep-ask] file inputs found:", fileInputs.length);
+  for (const fi of fileInputs) {
+    const accept = (fi.getAttribute("accept") || "").toLowerCase();
+    if (accept && !accept.includes("image") && !accept.includes("*")) continue;
+    try {
+      const dt2 = new DataTransfer();
+      dt2.items.add(file);
+      fi.files = dt2.files;
+      fi.dispatchEvent(new Event("change", { bubbles: true }));
+      console.log("[chatgpt-deep-ask] file input change dispatched, accept=", accept);
+    } catch (e) {
+      console.warn("[chatgpt-deep-ask] file input change failed:", e);
+    }
+  }
+
+  // Method 3 fallback: drop event on the editor
+  try {
+    const dt3 = new DataTransfer();
+    dt3.items.add(file);
+    const dropEvt = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(dropEvt, "dataTransfer", { value: dt3 });
+    editor.dispatchEvent(dropEvt);
+    console.log("[chatgpt-deep-ask] drop event dispatched");
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] drop failed:", e);
+  }
+
+  // Wait for upload to complete (preview thumbnail appears)
+  console.log("[chatgpt-deep-ask] waiting for image upload...");
+  await sleep(4000);
+
+  if (prompt && !editorText(editor)) {
+    injectText(editor, prompt);
+    await sleep(500);
+  }
+
+  const btn = await waitFor(findEnabledSendButton, 15000);
+  if (btn) {
+    console.log("[chatgpt-deep-ask] clicking send (with image)");
+    btn.click();
+  } else {
+    console.warn("[chatgpt-deep-ask] send button not enabled within 15s, trying Enter");
+    dispatchEnter(editor);
+  }
+  return true;
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));

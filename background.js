@@ -245,16 +245,75 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "ask-detail-from-selection") return;
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-  const resp = await sendMessageWithRetry(tab.id, { type: "GET_SELECTION" });
-  const text = (resp?.text || "").trim();
-  if (!text) return;
-  const prompt = buildSelectionPrompt(text);
-  if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
-    await showOverlayInTab(tab.id, prompt);
-  } else {
-    await openInPopupWindow(prompt);
+  if (command === "ask-detail-from-selection") {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return;
+    const resp = await sendMessageWithRetry(tab.id, { type: "GET_SELECTION" });
+    const text = (resp?.text || "").trim();
+    if (!text) return;
+    const prompt = buildSelectionPrompt(text);
+    if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
+      await showOverlayInTab(tab.id, prompt);
+    } else {
+      await openInPopupWindow(prompt);
+    }
+    return;
+  }
+  if (command === "test-capture") {
+    await testCapture();
+    return;
   }
 });
+
+async function testCapture() {
+  console.log("[chatgpt-deep-ask] capture triggered");
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] captureVisibleTab threw:", e?.message || e);
+    return;
+  }
+  if (!dataUrl) {
+    console.warn("[chatgpt-deep-ask] captureVisibleTab empty:", chrome.runtime.lastError?.message);
+    return;
+  }
+  console.log("[chatgpt-deep-ask] capture ok, size:", Math.round(dataUrl.length / 1024), "KB → opening ChatGPT popup");
+  await openCaptureInPopup(dataUrl);
+}
+
+async function openCaptureInPopup(imageDataUrl) {
+  if (!imageDataUrl) return;
+  const win = await chrome.windows.create({
+    url: "https://chatgpt.com/",
+    type: "popup",
+    width: 780,
+    height: 880,
+    focused: true
+  });
+  const tab = win?.tabs?.[0];
+  if (!tab?.id) {
+    console.warn("[chatgpt-deep-ask] popup window has no tab");
+    return;
+  }
+  const ok = await waitForTabComplete(tab.id);
+  if (!ok) console.warn("[chatgpt-deep-ask] popup did not finish loading in time");
+  await new Promise((r) => setTimeout(r, 2000));
+
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    console.log("[chatgpt-deep-ask] ATTACH_IMAGE attempt", attempt);
+    const ack = await sendMessageWithRetry(tab.id, {
+      type: "ATTACH_IMAGE",
+      dataUrl: imageDataUrl,
+      prompt: "이 이미지에 대해 설명해줘."
+    });
+    if (ack?.ok) {
+      console.log("[chatgpt-deep-ask] ATTACH_IMAGE acked at attempt", attempt);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.warn("[chatgpt-deep-ask] ATTACH_IMAGE failed after retries");
+}

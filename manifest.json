@@ -22,6 +22,14 @@
         "mac": "Command+Shift+Q"
       },
       "description": "선택한 텍스트로 상세 질문 패널 열기"
+    },
+    "test-capture": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "windows": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "[테스트] 현재 보이는 탭 영역 캡처 후 다운로드 폴더에 저장"
     }
   },
   "content_scripts": [
