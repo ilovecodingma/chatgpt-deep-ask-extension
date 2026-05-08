@@ -17,7 +17,12 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "ChatGPT 상세 질문 (클릭: 알림 테스트)"
+    "default_title": "ChatGPT 상세 질문 — 최근 호출 보기",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "commands": {
     "ask-detail-from-selection": {

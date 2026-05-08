@@ -29,6 +29,28 @@ function injectStyles() {
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = `
+    :root {
+      --dap-bg: #fff;
+      --dap-fg: #222;
+      --dap-border: #d0d0d0;
+      --dap-header-bg: #f4f4f5;
+      --dap-header-border: #e3e3e3;
+      --dap-btn-fg: #555;
+      --dap-status-bg: #eee;
+      --dap-status-fg: #888;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --dap-bg: #202123;
+        --dap-fg: #ececec;
+        --dap-border: #3a3a3a;
+        --dap-header-bg: #2a2b2d;
+        --dap-header-border: #3a3a3a;
+        --dap-btn-fg: #cfcfcf;
+        --dap-status-bg: #3a3a3a;
+        --dap-status-fg: #aaa;
+      }
+    }
     @keyframes __dap_spin { to { transform: rotate(360deg); } }
     .__dap_spinner {
       display: inline-block;
@@ -61,6 +83,28 @@ function injectStyles() {
 function getCurrentSelectionText() {
   const sel = window.getSelection();
   return sel ? sel.toString() : "";
+}
+
+function extractPageText() {
+  const skip = new Set([
+    "SCRIPT", "STYLE", "NOSCRIPT", "IFRAME", "OBJECT", "EMBED",
+    "NAV", "HEADER", "FOOTER", "ASIDE", "SVG"
+  ]);
+  function walk(node) {
+    if (!node) return "";
+    if (node.nodeType === 3) return node.textContent || "";
+    if (node.nodeType !== 1) return "";
+    if (skip.has(node.tagName)) return "";
+    try {
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return "";
+    } catch (_e) {}
+    let out = "";
+    for (const child of node.childNodes) out += walk(child) + " ";
+    return out;
+  }
+  const root = document.querySelector("main, article") || document.body || document.documentElement;
+  return walk(root).replace(/\s+/g, " ").trim().slice(0, 8000);
 }
 
 function getSelectionRect() {
@@ -213,14 +257,14 @@ function showPanel(prompt, options = {}) {
     top: ${pos.top}px;
     width: ${initW}px;
     height: ${initH}px;
-    background: #fff;
-    border: 1px solid #d0d0d0;
+    background: var(--dap-bg);
+    border: 1px solid var(--dap-border);
     border-radius: 10px;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35);
     z-index: 2147483647;
     overflow: hidden;
     font: 13px/1.4 -apple-system, system-ui, sans-serif;
-    color: #222;
+    color: var(--dap-fg);
   `;
 
   const fullHeader = document.createElement("div");
@@ -232,8 +276,8 @@ function showPanel(prompt, options = {}) {
     align-items: center;
     justify-content: space-between;
     padding: 0 12px;
-    background: #f4f4f5;
-    border-bottom: 1px solid #e3e3e3;
+    background: var(--dap-header-bg);
+    border-bottom: 1px solid var(--dap-header-border);
     user-select: none;
     cursor: move;
     z-index: 5;
@@ -262,7 +306,7 @@ function showPanel(prompt, options = {}) {
   hideBtn.setAttribute("aria-label", "최소화");
   hideBtn.style.cssText = `
     border: none; background: transparent; font-size: 16px; font-weight: 600;
-    cursor: pointer; color: #555; padding: 2px 8px; line-height: 1;
+    cursor: pointer; color: var(--dap-btn-fg); padding: 2px 8px; line-height: 1;
   `;
   hideBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -276,7 +320,7 @@ function showPanel(prompt, options = {}) {
   closeBtn.setAttribute("aria-label", "닫기");
   closeBtn.style.cssText = `
     border: none; background: transparent; font-size: 16px;
-    cursor: pointer; color: #555; padding: 2px 8px; line-height: 1;
+    cursor: pointer; color: var(--dap-btn-fg); padding: 2px 8px; line-height: 1;
   `;
   closeBtn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -551,6 +595,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ text: getCurrentSelectionText() });
     return true;
   }
+  if (msg?.type === "GET_PAGE_CONTEXT") {
+    sendResponse({
+      selection: getCurrentSelectionText(),
+      title: document.title,
+      url: location.href,
+      body: extractPageText()
+    });
+    return true;
+  }
   if (msg?.type === "SHOW_OVERLAY" && IS_TOP_FRAME) {
     showPanel(msg.prompt, msg.options || {});
   }
@@ -740,12 +793,28 @@ function attachRedBadgeToBubble() {
   bubble.appendChild(badge);
 }
 
-function notifyResponseDone(detail) {
+async function copyLastAssistantToClipboard() {
+  const text = getLastAssistantText();
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    console.log("[chatgpt-deep-ask] copied to clipboard, length:", text.length);
+    return true;
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] clipboard write failed:", e?.message || e);
+    return false;
+  }
+}
+
+async function notifyResponseDone(detail) {
   console.log("[chatgpt-deep-ask] notifyResponseDone. detail:", detail);
-  showInPageToast(detail || "✓ ChatGPT 응답 완료");
+  const copied = await copyLastAssistantToClipboard();
+  const baseText = detail || "✓ ChatGPT 응답 완료";
+  const toastText = copied ? `${baseText} (📋 클립보드에 복사됨)` : baseText;
+  showInPageToast(toastText);
   attachRedBadgeToBubble();
   try {
-    chrome.runtime.sendMessage({ type: "SHOW_NOTIFICATION", detail }, (resp) => {
+    chrome.runtime.sendMessage({ type: "SHOW_NOTIFICATION", detail: toastText }, (resp) => {
       const err = chrome.runtime.lastError;
       if (err) console.warn("[chatgpt-deep-ask] notify sendMessage error:", err.message);
       else console.log("[chatgpt-deep-ask] notify ack:", resp);

@@ -1,14 +1,100 @@
 console.log("[chatgpt-deep-ask] background.js loaded at", new Date().toISOString());
 
 const ASK_MENU_ID = "ask-detail-popup";
+const ASK_WITH_CONTEXT_MENU_ID = "ask-with-context";
 const SUMMARIZE_MENU_ID = "summarize-today";
 const SUMMARIZE_SITE_MENU_ID = "summarize-site";
+const TEMPLATES_PARENT_MENU_ID = "templates-parent";
+const TEMPLATE_MENU_PREFIX = "template-";
+const TEMPLATES_KEY = "promptTemplates";
 
-if (chrome.action && chrome.action.onClicked) {
-  chrome.action.onClicked.addListener(async () => {
-    console.log("[chatgpt-deep-ask] action icon clicked → firing test notification");
-    await showResponseDoneNotification("[테스트] 알림이 보이면 정상 동작 중입니다.");
+const DEFAULT_TEMPLATES = [
+  { id: "easy", title: "쉽게 설명", template: '아래 부분을 초보자가 이해할 수 있게 쉬운 말로 풀어 설명해줘.\n\n"""{TEXT}"""' },
+  { id: "tldr", title: "TL;DR (한두 문장 요약)", template: '아래 내용을 한국어로 1~2문장 핵심만 요약해줘.\n\n"""{TEXT}"""' },
+  { id: "translate-en", title: "영어로 번역", template: '다음을 자연스러운 영어로 번역해줘.\n\n"""{TEXT}"""' },
+  { id: "translate-ko", title: "한국어로 번역", template: '다음을 자연스러운 한국어로 번역해줘.\n\n"""{TEXT}"""' },
+  { id: "code-review", title: "코드 리뷰", template: '아래 코드를 리뷰해줘 — 버그, 성능, 가독성 관점에서. 개선 제안도 같이.\n\n```\n{TEXT}\n```' },
+  { id: "explain-jargon", title: "용어 풀이", template: '다음에 등장하는 전문 용어를 하나씩 한국어로 풀어 설명해줘.\n\n"""{TEXT}"""' }
+];
+
+async function getTemplates() {
+  const data = await chrome.storage.local.get([TEMPLATES_KEY]);
+  if (Array.isArray(data[TEMPLATES_KEY]) && data[TEMPLATES_KEY].length > 0) {
+    return data[TEMPLATES_KEY];
+  }
+  await chrome.storage.local.set({ [TEMPLATES_KEY]: DEFAULT_TEMPLATES });
+  return DEFAULT_TEMPLATES.slice();
+}
+
+function applyTemplate(tpl, vars) {
+  let out = tpl.template || "";
+  out = out.replace(/\{TEXT\}/g, vars.text || "");
+  out = out.replace(/\{URL\}/g, vars.url || "");
+  out = out.replace(/\{TITLE\}/g, vars.title || "");
+  return out;
+}
+
+async function buildTemplateMenus() {
+  const templates = await getTemplates();
+  // Remove existing template menu items (parent + children)
+  await new Promise((r) => chrome.contextMenus.remove(TEMPLATES_PARENT_MENU_ID, () => {
+    void chrome.runtime.lastError;
+    r();
+  }));
+  if (!templates.length) return;
+  chrome.contextMenus.create({
+    id: TEMPLATES_PARENT_MENU_ID,
+    title: "ChatGPT 템플릿",
+    contexts: ["selection"]
   });
+  for (const t of templates) {
+    if (!t.id || !t.title) continue;
+    chrome.contextMenus.create({
+      id: TEMPLATE_MENU_PREFIX + t.id,
+      parentId: TEMPLATES_PARENT_MENU_ID,
+      title: t.title,
+      contexts: ["selection"]
+    });
+  }
+}
+
+function buildContextPrompt(ctx) {
+  return `다음 웹페이지 컨텍스트를 참고해 [선택한 부분]에 대해 자세히 설명해줘. 페이지 흐름과 주제를 고려해 답해줘.
+
+[페이지 정보]
+URL: ${ctx.url}
+제목: ${ctx.title}
+
+[페이지 본문 일부]
+${ctx.body}
+
+[선택한 부분]
+"""${ctx.selection}"""`;
+}
+
+const HISTORY_KEY = "callHistory";
+const HISTORY_MAX = 50;
+
+async function recordHistory(type, prompt, hostOrUrl) {
+  let host = "";
+  try { host = new URL(hostOrUrl || "").hostname || ""; } catch (_e) {}
+  const entry = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    type,
+    summary: (prompt || "").trim().replace(/\s+/g, " ").slice(0, 200),
+    prompt: prompt || "",
+    host,
+    ts: Date.now()
+  };
+  try {
+    const data = await chrome.storage.local.get([HISTORY_KEY]);
+    const list = data[HISTORY_KEY] || [];
+    list.push(entry);
+    if (list.length > HISTORY_MAX) list.splice(0, list.length - HISTORY_MAX);
+    await chrome.storage.local.set({ [HISTORY_KEY]: list });
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] history save failed:", e);
+  }
 }
 
 function buildSelectionPrompt(selectedText) {
@@ -369,6 +455,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
+  if (msg?.type === "TEMPLATES_UPDATED") {
+    buildTemplateMenus().then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+  if (msg?.type === "RERUN_HISTORY") {
+    (async () => {
+      try {
+        const data = await chrome.storage.local.get([HISTORY_KEY]);
+        const list = data[HISTORY_KEY] || [];
+        const entry = list.find((e) => e.id === msg.id);
+        if (!entry || !entry.prompt) {
+          sendResponse({ ok: false, error: "not found" });
+          return;
+        }
+        await openInPopupWindow(entry.prompt);
+        await recordHistory("rerun", entry.prompt, entry.host || "");
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
 });
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -376,6 +485,11 @@ chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
       id: ASK_MENU_ID,
       title: "ChatGPT로 상세 질문하기",
+      contexts: ["selection"]
+    });
+    chrome.contextMenus.create({
+      id: ASK_WITH_CONTEXT_MENU_ID,
+      title: "선택 + 페이지 컨텍스트로 ChatGPT 질문",
       contexts: ["selection"]
     });
     chrome.contextMenus.create({
@@ -388,7 +502,12 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "이 사이트 활동 요약하기",
       contexts: ["page", "selection", "link", "frame"]
     });
+    buildTemplateMenus();
   });
+});
+
+chrome.runtime.onStartup?.addListener(() => {
+  buildTemplateMenus().catch((e) => console.warn("buildTemplateMenus startup:", e));
 });
 
 function isChatgptOrigin(url) {
@@ -401,6 +520,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const text = (info.selectionText || "").trim();
     if (!text) return;
     const prompt = buildSelectionPrompt(text);
+    recordHistory("ask-detail", prompt, tab.url);
     if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
       await showOverlayInTab(tab.id, prompt);
     } else {
@@ -411,13 +531,48 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       );
       await openInPopupWindow(prompt);
     }
+  } else if (info.menuItemId === ASK_WITH_CONTEXT_MENU_ID) {
+    if (!isInjectableUrl(tab.url)) {
+      console.warn("[chatgpt-deep-ask] cannot extract context from", tab.url);
+      return;
+    }
+    const ctx = await sendMessageWithRetry(tab.id, { type: "GET_PAGE_CONTEXT" });
+    if (!ctx?.selection) {
+      console.warn("[chatgpt-deep-ask] no selection in GET_PAGE_CONTEXT response");
+      return;
+    }
+    const prompt = buildContextPrompt(ctx);
+    recordHistory("ask-with-context", prompt, tab.url);
+    if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
+      await showOverlayInTab(tab.id, prompt);
+    } else {
+      await openInPopupWindow(prompt);
+    }
   } else if (info.menuItemId === SUMMARIZE_MENU_ID) {
     const prompt = await buildTodayHistoryPrompt();
     if (!prompt) {
       console.warn("[chatgpt-deep-ask] no history items today");
       return;
     }
+    recordHistory("summarize-today", prompt, tab.url);
     await openInPopupWindow(prompt);
+  } else if (typeof info.menuItemId === "string" && info.menuItemId.startsWith(TEMPLATE_MENU_PREFIX)) {
+    const tplId = info.menuItemId.slice(TEMPLATE_MENU_PREFIX.length);
+    const text = (info.selectionText || "").trim();
+    if (!text) return;
+    const templates = await getTemplates();
+    const tpl = templates.find((t) => t.id === tplId);
+    if (!tpl) {
+      console.warn("[chatgpt-deep-ask] template not found:", tplId);
+      return;
+    }
+    const prompt = applyTemplate(tpl, { text, url: tab.url || "", title: tab.title || "" });
+    recordHistory("template", prompt, tab.url);
+    if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
+      await showOverlayInTab(tab.id, prompt);
+    } else {
+      await openInPopupWindow(prompt);
+    }
   } else if (info.menuItemId === SUMMARIZE_SITE_MENU_ID) {
     let host = "";
     try {
@@ -432,6 +587,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       console.warn("[chatgpt-deep-ask] no history items for site", host);
       return;
     }
+    recordHistory("summarize-site", prompt, tab.url);
     await openInPopupWindow(prompt);
   }
 });
@@ -444,6 +600,7 @@ chrome.commands.onCommand.addListener(async (command) => {
     const text = (resp?.text || "").trim();
     if (!text) return;
     const prompt = buildSelectionPrompt(text);
+    recordHistory("shortcut-ask", prompt, tab.url);
     if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
       await showOverlayInTab(tab.id, prompt);
     } else {
@@ -452,6 +609,8 @@ chrome.commands.onCommand.addListener(async (command) => {
     return;
   }
   if (command === "test-capture") {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    recordHistory("capture", "[화면 캡처] 이 이미지에 대해 설명해줘.", tab?.url || "");
     await testCapture();
     return;
   }
