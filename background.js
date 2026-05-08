@@ -209,20 +209,26 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+function isChatgptOrigin(url) {
+  return !!url && /^https?:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url);
+}
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab?.id) return;
   if (info.menuItemId === ASK_MENU_ID) {
     const text = (info.selectionText || "").trim();
     if (!text) return;
-    if (!isInjectableUrl(tab.url)) {
-      console.warn(
-        "[chatgpt-deep-ask] '상세 질문하기'는 현재 탭에서 호출돼야 합니다. 이 페이지(",
+    const prompt = buildSelectionPrompt(text);
+    if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
+      await showOverlayInTab(tab.id, prompt);
+    } else {
+      console.log(
+        "[chatgpt-deep-ask] non-ChatGPT origin (",
         tab.url,
-        ")엔 패널을 띄울 수 없습니다."
+        "), opening popup window for reliable auth"
       );
-      return;
+      await openInPopupWindow(prompt);
     }
-    await showOverlayInTab(tab.id, buildSelectionPrompt(text));
   } else if (info.menuItemId === SUMMARIZE_MENU_ID) {
     const prompt = await buildTodayHistoryPrompt();
     if (!prompt) {
@@ -245,5 +251,10 @@ chrome.commands.onCommand.addListener(async (command) => {
   const resp = await sendMessageWithRetry(tab.id, { type: "GET_SELECTION" });
   const text = (resp?.text || "").trim();
   if (!text) return;
-  await showOverlayInTab(tab.id, buildSelectionPrompt(text));
+  const prompt = buildSelectionPrompt(text);
+  if (isChatgptOrigin(tab.url) && isInjectableUrl(tab.url)) {
+    await showOverlayInTab(tab.id, prompt);
+  } else {
+    await openInPopupWindow(prompt);
+  }
 });
