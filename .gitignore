@@ -1,0 +1,15 @@
+# Chrome unpacked extension auto-generated metadata
+_metadata/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Node (혹시 나중에 빌드 도구 추가 시)
+node_modules/
+dist/
+build/
+*.log
