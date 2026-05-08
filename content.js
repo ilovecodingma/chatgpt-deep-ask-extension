@@ -820,7 +820,7 @@ async function autoSubmitInIframe() {
   const startedStreaming = await waitFor(isStreaming, 8000);
   if (!startedStreaming) {
     console.warn("[chatgpt-deep-ask] stop button never appeared; assuming response is short");
-    await sleep(2000);
+    await sleep(4000);
   } else {
     await waitFor(() => !isStreaming(), 600000, 250);
     await sleep(500);

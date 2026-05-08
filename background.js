@@ -1,5 +1,6 @@
 const ASK_MENU_ID = "ask-detail-popup";
 const SUMMARIZE_MENU_ID = "summarize-today";
+const SUMMARIZE_SITE_MENU_ID = "summarize-site";
 
 function buildSelectionPrompt(selectedText) {
   return `아래 부분을 더 깊이 이해하고 싶어. 무슨 의미인지, 왜 그런지, 관련 배경까지 풀어서 설명해줘.\n\n"""${selectedText}"""`;
@@ -67,6 +68,76 @@ async function buildTodayHistoryPrompt() {
   );
 }
 
+async function buildSiteHistoryPrompt(host) {
+  if (!host) return null;
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  let startTime = startOfDay.getTime();
+
+  function matchesHost(it) {
+    if (!it.url || !/^https?:/i.test(it.url)) return false;
+    try {
+      const u = new URL(it.url);
+      return u.hostname === host || u.hostname.endsWith("." + host);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  let items = [];
+  try {
+    items = await chrome.history.search({ text: host, startTime, maxResults: 2000 });
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] history.search failed:", e);
+    return null;
+  }
+  let filtered = items.filter(matchesHost);
+  console.log("[chatgpt-deep-ask] site history items today for", host, ":", filtered.length);
+
+  if (filtered.length === 0) {
+    startTime = Date.now() - 24 * 60 * 60 * 1000;
+    try {
+      items = await chrome.history.search({ text: host, startTime, maxResults: 2000 });
+    } catch (_e) {}
+    filtered = items.filter(matchesHost);
+    console.log("[chatgpt-deep-ask] site history fallback (last 24h) for", host, ":", filtered.length);
+  }
+
+  const byUrl = new Map();
+  for (const it of filtered) {
+    const ex = byUrl.get(it.url);
+    if (!ex || (it.lastVisitTime || 0) > (ex.lastVisitTime || 0)) byUrl.set(it.url, it);
+  }
+
+  const all = Array.from(byUrl.values());
+  all.sort((a, b) => (b.visitCount || 0) - (a.visitCount || 0));
+  const top = all.slice(0, 200);
+  top.sort((a, b) => (a.lastVisitTime || 0) - (b.lastVisitTime || 0));
+
+  const lines = top.map((it) => {
+    const t = new Date(it.lastVisitTime || 0);
+    const hh = String(t.getHours()).padStart(2, "0");
+    const mm = String(t.getMinutes()).padStart(2, "0");
+    const title = (it.title || "").slice(0, 140).replace(/\s+/g, " ").replace(/\|/g, "/").trim();
+    let pathOnly = it.url;
+    try {
+      const u = new URL(it.url);
+      pathOnly = u.pathname + (u.search || "");
+    } catch (_e) {}
+    return `- ${hh}:${mm} | ${title} | ${pathOnly}`;
+  });
+
+  if (lines.length === 0) return null;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  return (
+    `다음은 내가 오늘(${todayStr}) 사이트 "${host}" 에서 방문한 페이지 목록입니다 (총 ${lines.length}개, 시간순 정렬). ` +
+    `이 사이트에서 어떤 작업·주제에 시간을 썼는지, 어떤 흐름으로 탐색했는지 한국어로 정리하고 카테고리별로 묶어 핵심 활동을 요약해줘. ` +
+    `URL은 경로(path) 단위로 묶고, 개인정보가 포함될 수 있는 경로는 일반화해서 언급해줘.\n\n` +
+    lines.join("\n")
+  );
+}
+
 const UNSUPPORTED_URL_PREFIXES = [
   "chrome://",
   "chrome-extension://",
@@ -82,6 +153,63 @@ function isInjectableUrl(url) {
   if (!url) return false;
   return !UNSUPPORTED_URL_PREFIXES.some((p) => url.startsWith(p));
 }
+
+const POPUP_SIZE_KEY = "popupWindowSize";
+const DEFAULT_POPUP_SIZE = { width: 780, height: 880 };
+
+async function getStoredPopupSize() {
+  try {
+    const data = await chrome.storage.local.get([POPUP_SIZE_KEY]);
+    const s = data[POPUP_SIZE_KEY];
+    if (s && Number.isFinite(s.width) && Number.isFinite(s.height) && s.width >= 320 && s.height >= 320) {
+      return { width: Math.round(s.width), height: Math.round(s.height) };
+    }
+  } catch (_e) {}
+  return { ...DEFAULT_POPUP_SIZE };
+}
+
+async function createTrackedPopup(url) {
+  const size = await getStoredPopupSize();
+  const win = await chrome.windows.create({
+    url,
+    type: "popup",
+    width: size.width,
+    height: size.height,
+    focused: true
+  });
+  if (win?.id) {
+    try {
+      const cur = await chrome.storage.session.get(["trackedPopupIds"]);
+      const ids = new Set(cur.trackedPopupIds || []);
+      ids.add(win.id);
+      await chrome.storage.session.set({ trackedPopupIds: [...ids] });
+    } catch (_e) {}
+  }
+  return win;
+}
+
+if (chrome.windows.onBoundsChanged) {
+  chrome.windows.onBoundsChanged.addListener(async (window) => {
+    if (!window?.id || !window.width || !window.height) return;
+    try {
+      const cur = await chrome.storage.session.get(["trackedPopupIds"]);
+      const ids = cur.trackedPopupIds || [];
+      if (!ids.includes(window.id)) return;
+      await chrome.storage.local.set({
+        [POPUP_SIZE_KEY]: { width: window.width, height: window.height }
+      });
+      console.log("[chatgpt-deep-ask] popup size saved:", window.width, "x", window.height);
+    } catch (_e) {}
+  });
+}
+
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  try {
+    const cur = await chrome.storage.session.get(["trackedPopupIds"]);
+    const ids = (cur.trackedPopupIds || []).filter((id) => id !== windowId);
+    await chrome.storage.session.set({ trackedPopupIds: ids });
+  } catch (_e) {}
+});
 
 async function ensureContentScript(tabId) {
   try {
@@ -165,13 +293,7 @@ async function openInPopupWindow(prompt) {
     return;
   }
   console.log("[chatgpt-deep-ask] opening popup window. prompt length:", prompt.length);
-  const win = await chrome.windows.create({
-    url: "https://chatgpt.com/",
-    type: "popup",
-    width: 780,
-    height: 880,
-    focused: true
-  });
+  const win = await createTrackedPopup("https://chatgpt.com/");
   const tab = win?.tabs?.[0];
   if (!tab?.id) {
     console.warn("[chatgpt-deep-ask] popup window has no tab");
@@ -206,6 +328,11 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "오늘 활동 요약하기 (백그라운드)",
       contexts: ["page", "selection", "link", "frame"]
     });
+    chrome.contextMenus.create({
+      id: SUMMARIZE_SITE_MENU_ID,
+      title: "이 사이트 활동 요약하기",
+      contexts: ["page", "selection", "link", "frame"]
+    });
   });
 });
 
@@ -235,12 +362,22 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       console.warn("[chatgpt-deep-ask] no history items today");
       return;
     }
-    if (isInjectableUrl(tab.url)) {
-      await showOverlayInTab(tab.id, prompt, { minimized: true });
-    } else {
-      console.log("[chatgpt-deep-ask] 현재 탭이 주입 불가 페이지여서 popup window로 처리합니다.");
-      await openInPopupWindow(prompt);
+    await openInPopupWindow(prompt);
+  } else if (info.menuItemId === SUMMARIZE_SITE_MENU_ID) {
+    let host = "";
+    try {
+      host = new URL(tab.url).hostname;
+    } catch (_e) {}
+    if (!host) {
+      console.warn("[chatgpt-deep-ask] cannot determine host from tab.url:", tab.url);
+      return;
     }
+    const prompt = await buildSiteHistoryPrompt(host);
+    if (!prompt) {
+      console.warn("[chatgpt-deep-ask] no history items for site", host);
+      return;
+    }
+    await openInPopupWindow(prompt);
   }
 });
 
@@ -286,13 +423,7 @@ async function testCapture() {
 
 async function openCaptureInPopup(imageDataUrl) {
   if (!imageDataUrl) return;
-  const win = await chrome.windows.create({
-    url: "https://chatgpt.com/",
-    type: "popup",
-    width: 780,
-    height: 880,
-    focused: true
-  });
+  const win = await createTrackedPopup("https://chatgpt.com/");
   const tab = win?.tabs?.[0];
   if (!tab?.id) {
     console.warn("[chatgpt-deep-ask] popup window has no tab");
