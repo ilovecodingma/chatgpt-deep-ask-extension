@@ -9,11 +9,15 @@
     "tabs",
     "history",
     "declarativeNetRequest",
-    "storage"
+    "storage",
+    "notifications"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "ChatGPT 상세 질문 (클릭: 알림 테스트)"
   },
   "commands": {
     "ask-detail-from-selection": {

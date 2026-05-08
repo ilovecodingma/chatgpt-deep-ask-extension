@@ -7,6 +7,7 @@ window.__chatgpt_deep_ask_inited__ = true;
 const IS_TOP_FRAME = window.top === window.self;
 console.log("[chatgpt-deep-ask] content.js loaded. url:", location.href, "isTop:", IS_TOP_FRAME);
 const PANEL_ID = "__chatgpt_deep_ask_panel__";
+const BUBBLE_ID = "__chatgpt_deep_ask_bubble__";
 const STYLE_ID = "__chatgpt_deep_ask_styles__";
 const HEIGHT_KEY = "__chatgpt_deep_ask_panel_height__";
 const WIDTH_KEY = "__chatgpt_deep_ask_panel_width__";
@@ -37,6 +38,21 @@ function injectStyles() {
       border-radius: 50%;
       animation: __dap_spin 0.9s linear infinite;
       vertical-align: -3px;
+    }
+    @keyframes __dap_badge_pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.7); }
+      50% { transform: scale(1.15); box-shadow: 0 0 0 8px rgba(229, 57, 53, 0); }
+    }
+    .__dap_bubble_badge {
+      position: absolute;
+      top: -3px; right: -3px;
+      width: 16px; height: 16px;
+      border-radius: 50%;
+      background: #e53935;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+      pointer-events: none;
+      animation: __dap_badge_pulse 1.4s ease-in-out infinite;
     }
   `;
   (document.head || document.documentElement).appendChild(style);
@@ -83,6 +99,57 @@ function saveSize(partial) {
 function closePanel() {
   const el = document.getElementById(PANEL_ID);
   if (el) el.remove();
+  removeBubble();
+}
+
+function removeBubble() {
+  const b = document.getElementById(BUBBLE_ID);
+  if (b) b.remove();
+}
+
+function hidePanelToBubble(panel) {
+  if (!panel) panel = document.getElementById(PANEL_ID);
+  if (!panel) return;
+  panel.style.display = "none";
+  showBubble(panel);
+}
+
+function showBubble(panelToRestore) {
+  removeBubble();
+  const bubble = document.createElement("div");
+  bubble.id = BUBBLE_ID;
+  bubble.title = "클릭해서 ChatGPT 패널 복원";
+  bubble.style.cssText = `
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    background: #4a90e2;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 2147483647;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    font: 22px/1 -apple-system, system-ui, sans-serif;
+    user-select: none;
+    transition: transform 0.12s ease;
+  `;
+  bubble.textContent = "💬";
+  bubble.addEventListener("mouseenter", () => {
+    bubble.style.transform = "scale(1.08)";
+  });
+  bubble.addEventListener("mouseleave", () => {
+    bubble.style.transform = "scale(1)";
+  });
+  bubble.addEventListener("click", () => {
+    const panel = document.getElementById(PANEL_ID) || panelToRestore;
+    removeBubble();
+    if (panel) panel.style.display = "";
+  });
+  document.documentElement.appendChild(bubble);
 }
 
 function createCoverLayer(cursor) {
@@ -186,6 +253,24 @@ function showPanel(prompt, options = {}) {
   titleGroup.appendChild(statusLabel);
   fullHeader.appendChild(titleGroup);
 
+  const btnGroup = document.createElement("span");
+  btnGroup.style.cssText = "display: inline-flex; align-items: center; gap: 2px;";
+
+  const hideBtn = document.createElement("button");
+  hideBtn.textContent = "—";
+  hideBtn.title = "최소화 (우하단 버블로)";
+  hideBtn.setAttribute("aria-label", "최소화");
+  hideBtn.style.cssText = `
+    border: none; background: transparent; font-size: 16px; font-weight: 600;
+    cursor: pointer; color: #555; padding: 2px 8px; line-height: 1;
+  `;
+  hideBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    hidePanelToBubble(panel);
+  });
+  hideBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+  btnGroup.appendChild(hideBtn);
+
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "✕";
   closeBtn.setAttribute("aria-label", "닫기");
@@ -198,7 +283,8 @@ function showPanel(prompt, options = {}) {
     closePanel();
   });
   closeBtn.addEventListener("mousedown", (e) => e.stopPropagation());
-  fullHeader.appendChild(closeBtn);
+  btnGroup.appendChild(closeBtn);
+  fullHeader.appendChild(btnGroup);
 
   const miniBar = document.createElement("div");
   miniBar.style.cssText = `
@@ -447,6 +533,7 @@ function showPanel(prompt, options = {}) {
       setStatus("응답 받는 중...");
     } else if (t === "DEEP_ASK_DONE") {
       setStatus("응답 완료");
+      attachRedBadgeToBubble();
       if (panel.dataset.state === "minimized") {
         spinner.style.display = "none";
         setTimeout(expandPanel, 250);
@@ -470,17 +557,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "DIRECT_SUBMIT" && IS_TOP_FRAME) {
     console.log("[chatgpt-deep-ask] DIRECT_SUBMIT received. prompt length:", msg.prompt?.length);
     sendResponse({ ok: true, started: true });
-    fillAndSubmit(msg.prompt)
-      .then((ok) => console.log("[chatgpt-deep-ask] fillAndSubmit returned", ok))
-      .catch((e) => console.warn("[chatgpt-deep-ask] fillAndSubmit threw:", e));
+    (async () => {
+      const ok = await fillAndSubmit(msg.prompt).catch((e) => {
+        console.warn("[chatgpt-deep-ask] fillAndSubmit threw:", e);
+        return false;
+      });
+      console.log("[chatgpt-deep-ask] fillAndSubmit returned", ok);
+      if (ok) {
+        await waitForChatStop();
+        notifyResponseDone();
+      }
+    })();
     return false;
   }
   if (msg?.type === "ATTACH_IMAGE" && IS_TOP_FRAME) {
     console.log("[chatgpt-deep-ask] ATTACH_IMAGE received. dataUrl size:", msg.dataUrl?.length);
     sendResponse({ ok: true, started: true });
-    attachImageAndSubmit(msg.dataUrl, msg.prompt)
-      .then((ok) => console.log("[chatgpt-deep-ask] attachImageAndSubmit returned", ok))
-      .catch((e) => console.warn("[chatgpt-deep-ask] attachImageAndSubmit threw:", e));
+    (async () => {
+      const ok = await attachImageAndSubmit(msg.dataUrl, msg.prompt).catch((e) => {
+        console.warn("[chatgpt-deep-ask] attachImageAndSubmit threw:", e);
+        return false;
+      });
+      console.log("[chatgpt-deep-ask] attachImageAndSubmit returned", ok);
+      if (ok) {
+        await waitForChatStop();
+        notifyResponseDone();
+      }
+    })();
     return false;
   }
 });
@@ -597,6 +700,130 @@ function postParent(data) {
   } catch (_e) {}
 }
 
+function showInPageToast(text, kind) {
+  const color = kind === "error" ? "#c0392b" : kind === "warn" ? "#d97706" : "#10a37f";
+  const toast = document.createElement("div");
+  toast.className = "__dap_toast";
+  toast.style.cssText = `
+    position: fixed; top: 20px; right: 20px;
+    background: ${color}; color: #fff;
+    padding: 12px 18px; border-radius: 10px;
+    font: 13px/1.4 -apple-system, system-ui, sans-serif;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+    z-index: 2147483647;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    transform: translateY(-10px);
+    opacity: 0;
+    max-width: 320px;
+    pointer-events: none;
+  `;
+  toast.textContent = text;
+  (document.body || document.documentElement).appendChild(toast);
+  requestAnimationFrame(() => {
+    toast.style.opacity = "1";
+    toast.style.transform = "translateY(0)";
+  });
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(-10px)";
+    setTimeout(() => toast.remove(), 320);
+  }, 4500);
+}
+
+function attachRedBadgeToBubble() {
+  const bubble = document.getElementById(BUBBLE_ID);
+  if (!bubble) return;
+  if (bubble.querySelector(".__dap_bubble_badge")) return;
+  injectStyles();
+  const badge = document.createElement("div");
+  badge.className = "__dap_bubble_badge";
+  bubble.appendChild(badge);
+}
+
+function notifyResponseDone(detail) {
+  console.log("[chatgpt-deep-ask] notifyResponseDone. detail:", detail);
+  showInPageToast(detail || "✓ ChatGPT 응답 완료");
+  attachRedBadgeToBubble();
+  try {
+    chrome.runtime.sendMessage({ type: "SHOW_NOTIFICATION", detail }, (resp) => {
+      const err = chrome.runtime.lastError;
+      if (err) console.warn("[chatgpt-deep-ask] notify sendMessage error:", err.message);
+      else console.log("[chatgpt-deep-ask] notify ack:", resp);
+    });
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] notify threw:", e);
+  }
+}
+
+function getLastAssistantText() {
+  const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
+  if (msgs.length === 0) return "";
+  return (msgs[msgs.length - 1].innerText || msgs[msgs.length - 1].textContent || "").trim();
+}
+
+async function waitForChatStop() {
+  console.log("[chatgpt-deep-ask] waitForChatStop: phase 1 — waiting for response to start");
+  const baseAssistantText = getLastAssistantText();
+  const phase1Start = Date.now();
+  let sawStreaming = false;
+  let started = false;
+  while (Date.now() - phase1Start < 30000) {
+    if (isStreaming()) { sawStreaming = true; started = true; break; }
+    const cur = getLastAssistantText();
+    if (cur && cur !== baseAssistantText) { started = true; break; }
+    await sleep(200);
+  }
+  if (!started) {
+    console.warn("[chatgpt-deep-ask] waitForChatStop: response never started in 30s; giving up");
+    return;
+  }
+  console.log("[chatgpt-deep-ask] waitForChatStop: started (sawStreaming=", sawStreaming, "), phase 2");
+
+  const STABLE_MS = 4500;
+  const MIN_PHASE2_MS = 6000;
+  const POLL_MS = 300;
+  let lastText = getLastAssistantText();
+  let stableSince = Date.now();
+  let everSeenStreamingInPhase2 = sawStreaming;
+  const phase2Start = Date.now();
+  while (Date.now() - phase2Start < 600000) {
+    const streaming = isStreaming();
+    if (streaming) everSeenStreamingInPhase2 = true;
+    const cur = getLastAssistantText();
+    if (cur !== lastText) {
+      lastText = cur;
+      stableSince = Date.now();
+    }
+    const phase2Elapsed = Date.now() - phase2Start;
+    const sinceStable = Date.now() - stableSince;
+    const conditions = {
+      stopHidden: !streaming,
+      stableEnough: sinceStable >= STABLE_MS,
+      hasText: cur.length > 0,
+      enoughTimePassed: phase2Elapsed >= MIN_PHASE2_MS,
+      sawStreamingAtSomePoint: everSeenStreamingInPhase2
+    };
+    if (
+      conditions.stopHidden &&
+      conditions.stableEnough &&
+      conditions.hasText &&
+      conditions.enoughTimePassed &&
+      conditions.sawStreamingAtSomePoint
+    ) {
+      console.log(
+        "[chatgpt-deep-ask] waitForChatStop: response complete, length:",
+        cur.length,
+        "phase2 elapsed:",
+        phase2Elapsed,
+        "ms"
+      );
+      return;
+    }
+    await sleep(POLL_MS);
+  }
+  console.warn("[chatgpt-deep-ask] waitForChatStop: timed out after 10min");
+}
+
 const EDITOR_SELECTORS_ORDERED = [
   '#prompt-textarea[contenteditable="true"]',
   'div#prompt-textarea',
@@ -620,9 +847,18 @@ const SEND_BUTTON_SELECTORS = [
 const STOP_BUTTON_SELECTORS = [
   'button[data-testid="stop-button"]',
   'button[data-testid="composer-stop-button"]',
+  'button[data-testid*="stop"]',
   'button[aria-label*="Stop"]',
   'button[aria-label*="stop"]',
-  'button[aria-label*="중지"]'
+  'button[aria-label*="중지"]',
+  'button[aria-label*="응답 중지"]',
+  'button[aria-label*="멈추기"]'
+];
+
+const STREAMING_INDICATOR_SELECTORS = [
+  '[data-message-author-role="assistant"][data-message-status="in_progress"]',
+  '[data-message-author-role="assistant"]:has(.result-streaming)',
+  '.result-streaming'
 ];
 
 function isVisibleEditor(el) {
@@ -671,8 +907,15 @@ function findEnabledSendButton() {
 }
 function isStreaming() {
   for (const sel of STOP_BUTTON_SELECTORS) {
-    const el = document.querySelector(sel);
-    if (el && el.offsetParent !== null) return true;
+    try {
+      const el = document.querySelector(sel);
+      if (el && el.offsetParent !== null) return true;
+    } catch (_e) {}
+  }
+  for (const sel of STREAMING_INDICATOR_SELECTORS) {
+    try {
+      if (document.querySelector(sel)) return true;
+    } catch (_e) {}
   }
   return false;
 }
@@ -743,20 +986,44 @@ function dumpEditorDiagnostics() {
 async function fillAndSubmit(prompt) {
   console.log("[chatgpt-deep-ask] fillAndSubmit start. prompt length:", prompt?.length, "url:", location.href);
   if (!prompt) return false;
+
   const editor = await waitFor(findEditor, 15000);
   if (!editor) {
     console.warn("[chatgpt-deep-ask] fillAndSubmit: editor not found after 15s");
     dumpEditorDiagnostics();
+    showInPageToast("ChatGPT 입력창을 찾지 못했습니다.", "error");
     return false;
   }
   console.log("[chatgpt-deep-ask] editor found:", editor.tagName, editor.id || "(no id)");
   await sleep(300);
-  if (!editorText(editor)) {
-    console.log("[chatgpt-deep-ask] injecting text...");
+
+  // === Step 1: ensure text is in the editor (with retries) ===
+  const minExpected = Math.min(prompt.length, 20);
+  let injected = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const cur = editorText(editor);
+    if (cur.length >= minExpected) {
+      console.log("[chatgpt-deep-ask] text already present, length:", cur.length);
+      injected = true;
+      break;
+    }
+    console.log(`[chatgpt-deep-ask] inject attempt ${attempt}, current length:`, cur.length);
     injectText(editor, prompt);
-    await sleep(400);
+    await sleep(500);
+    const after = editorText(editor);
+    console.log(`[chatgpt-deep-ask] inject attempt ${attempt} result length:`, after.length);
+    if (after.length >= minExpected) {
+      injected = true;
+      break;
+    }
   }
-  console.log("[chatgpt-deep-ask] editor text length after inject:", editorText(editor).length);
+  if (!injected) {
+    console.warn("[chatgpt-deep-ask] text injection failed after 3 attempts");
+    showInPageToast("프롬프트 주입 실패 — 자동 전송 중단", "error");
+    return false;
+  }
+
+  // === Step 2: click send button ===
   const btn = await waitFor(findEnabledSendButton, 5000);
   if (btn) {
     console.log("[chatgpt-deep-ask] clicking send button");
@@ -765,11 +1032,32 @@ async function fillAndSubmit(prompt) {
     console.log("[chatgpt-deep-ask] send button not found, dispatching Enter");
     dispatchEnter(editor);
   }
-  await sleep(800);
-  if (editorText(editor)) {
-    console.log("[chatgpt-deep-ask] text still present, dispatching Enter again");
-    dispatchEnter(editor);
+
+  // === Step 3: verify submission (editor cleared OR streaming started) ===
+  let submitted = false;
+  for (let i = 0; i < 25; i++) { // up to ~5s
+    await sleep(200);
+    if (editorText(editor).length === 0 || isStreaming()) {
+      submitted = true;
+      break;
+    }
   }
+  if (!submitted) {
+    console.warn("[chatgpt-deep-ask] submission not confirmed; trying Enter as fallback");
+    dispatchEnter(editor);
+    await sleep(800);
+    if (editorText(editor).length === 0 || isStreaming()) {
+      submitted = true;
+    }
+  }
+  if (!submitted) {
+    console.warn("[chatgpt-deep-ask] could not confirm submission");
+    showInPageToast("전송 확인 실패 — 입력은 됐으나 send가 안 먹힘", "warn");
+    return false;
+  }
+
+  console.log("[chatgpt-deep-ask] submission confirmed");
+  showInPageToast("✓ 프롬프트 전송됨, 응답 대기 중...");
   return true;
 }
 
@@ -817,16 +1105,10 @@ async function autoSubmitInIframe() {
 
   postParent({ type: "DEEP_ASK_SUBMITTED" });
 
-  const startedStreaming = await waitFor(isStreaming, 8000);
-  if (!startedStreaming) {
-    console.warn("[chatgpt-deep-ask] stop button never appeared; assuming response is short");
-    await sleep(4000);
-  } else {
-    await waitFor(() => !isStreaming(), 600000, 250);
-    await sleep(500);
-  }
+  await waitForChatStop();
 
   postParent({ type: "DEEP_ASK_DONE" });
+  notifyResponseDone();
   history.replaceState(null, "", location.pathname + location.search);
 }
 

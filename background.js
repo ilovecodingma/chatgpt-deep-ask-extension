@@ -1,6 +1,15 @@
+console.log("[chatgpt-deep-ask] background.js loaded at", new Date().toISOString());
+
 const ASK_MENU_ID = "ask-detail-popup";
 const SUMMARIZE_MENU_ID = "summarize-today";
 const SUMMARIZE_SITE_MENU_ID = "summarize-site";
+
+if (chrome.action && chrome.action.onClicked) {
+  chrome.action.onClicked.addListener(async () => {
+    console.log("[chatgpt-deep-ask] action icon clicked → firing test notification");
+    await showResponseDoneNotification("[테스트] 알림이 보이면 정상 동작 중입니다.");
+  });
+}
 
 function buildSelectionPrompt(selectedText) {
   return `아래 부분을 더 깊이 이해하고 싶어. 무슨 의미인지, 왜 그런지, 관련 배경까지 풀어서 설명해줘.\n\n"""${selectedText}"""`;
@@ -315,6 +324,52 @@ async function openInPopupWindow(prompt) {
   }
   console.warn("[chatgpt-deep-ask] DIRECT_SUBMIT failed after all retries");
 }
+
+const NOTIFICATION_ICON_PATH = "notification-icon.png";
+
+async function showResponseDoneNotification(detail) {
+  console.log("[chatgpt-deep-ask] showResponseDoneNotification called. detail:", detail);
+  const permission = await new Promise((r) => {
+    try {
+      chrome.notifications.getPermissionLevel((level) => r(level));
+    } catch (_e) {
+      r("unknown");
+    }
+  });
+  console.log("[chatgpt-deep-ask] notification permission level:", permission);
+
+  const iconUrl = chrome.runtime.getURL(NOTIFICATION_ICON_PATH);
+  const opts = {
+    type: "basic",
+    iconUrl,
+    title: "ChatGPT 응답 완료",
+    message: detail || "답변이 도착했습니다. 패널을 확인하세요.",
+    priority: 2,
+    requireInteraction: false
+  };
+  console.log("[chatgpt-deep-ask] notifications.create with iconUrl:", iconUrl);
+  try {
+    chrome.notifications.create(opts, (notificationId) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        console.warn("[chatgpt-deep-ask] notifications.create error:", err.message);
+      } else {
+        console.log("[chatgpt-deep-ask] notification created. id:", notificationId);
+      }
+    });
+  } catch (e) {
+    console.warn("[chatgpt-deep-ask] notification create threw:", e);
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "SHOW_NOTIFICATION") {
+    console.log("[chatgpt-deep-ask] SHOW_NOTIFICATION received from", sender?.tab?.url || "(unknown)");
+    showResponseDoneNotification(msg.detail);
+    sendResponse({ ok: true });
+    return false;
+  }
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
